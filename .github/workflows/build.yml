@@ -166,11 +166,21 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ inputs.susfs_ref }}" "${{ inputs.susfs_repo }}" susfs4ksu
           cd kernel-source
+          susfs_ksu_patch="../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           susfs_patch="../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch"
+          if [ ! -f "${susfs_ksu_patch}" ]; then
+            echo "susfs ksu patch not found: ${susfs_ksu_patch}"
+            exit 1
+          fi
           if [ ! -f "${susfs_patch}" ]; then
             echo "susfs patch not found: ${susfs_patch}"
             exit 1
           fi
+          cp -f "${susfs_ksu_patch}" KernelSU/
+          (
+            cd KernelSU
+            patch -p1 -F 3 --forward < 10_enable_susfs_for_ksu.patch
+          )
           cp -f ../susfs4ksu/kernel_patches/fs/* fs/
           cp -f ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -f "${susfs_patch}" ./
