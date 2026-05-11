@@ -30,6 +30,21 @@ index e0ca9af..974b769 100644
              return 0;
          }
  
+diff --git a/drivers/kernelsu/runtime/ksud.c b/drivers/kernelsu/runtime/ksud.c
+index 2a1ef1f..55ca906 100644
+--- a/drivers/kernelsu/runtime/ksud.c
++++ b/drivers/kernelsu/runtime/ksud.c
+@@ -30,8 +30,8 @@ static void stop_vfs_read_hook();
+ static void stop_input_hook();
+ 
+ #if defined(CONFIG_KSU_SUSFS) && defined(KSU_COMPAT_USE_STATIC_KEY)
+-extern struct static_key_false ksu_init_rc_hook_key_false;
+-extern struct static_key_false ksu_input_hook_key_false;
++DEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);
++DEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);
+ #else
+ bool ksu_vfs_read_hook __read_mostly = true;
+ bool ksu_execveat_hook __read_mostly = true;
 diff --git a/drivers/kernelsu/hook/lsm_hook.c b/drivers/kernelsu/hook/lsm_hook.c
 index 8a6579d..1cd1e0a 100644
 --- a/drivers/kernelsu/hook/lsm_hook.c
