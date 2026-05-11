@@ -1,10 +1,10 @@
-name: Build K40 Kernel
+name: Build K40 Kernel (SukiSU Ultra)
 
 on:
   workflow_dispatch:
     inputs:
       ksu:
-        description: '添加KSU支持'
+        description: '添加 SukiSU Ultra 支持'
         required: false
         default: 'true'
       config_path:
@@ -37,7 +37,7 @@ jobs:
 
   build_kernel:
 
-    name: Build K40 Kernel
+    name: Build K40 Kernel (SukiSU Ultra)
 
     runs-on: ubuntu-22.04
 
@@ -65,8 +65,13 @@ jobs:
       - name: Init Config
         id: init_config
         run: |
-          processed_name=$(echo ${{ inputs.config_name }} | awk -F'/' '{ if (NF > 1) print $NF; else print $0 }')
-          echo "processed_name=$(echo $processed_name)" >> $GITHUB_OUTPUT
+          processed_name="$(basename "${{ inputs.config_name }}")"
+          echo "processed_name=${processed_name}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event.inputs.ksu }}" = "true" ]; then
+            echo "artifact_name=${processed_name} SukiSU-Ultra" >> $GITHUB_OUTPUT
+          else
+            echo "artifact_name=${processed_name} Kernel" >> $GITHUB_OUTPUT
+          fi
 
       - name: Install Clang
         run: |
@@ -78,26 +83,35 @@ jobs:
         run: |
           git clone --depth=1 -b ${{ inputs.kernel_tag }} ${{ inputs.git_url }} kernel-source
           
-      - name: Support KernelSU
+      - name: Support SukiSU Ultra
         if: github.event.inputs.ksu == 'true'
         run: |
-          git clone https://github.com/tiann/KernelSU kernel-source/KernelSU
           cd kernel-source
-          echo "CONFIG_KPROBES=y" >> ${{ inputs.config_path }}${{ inputs.config_name }}
-          echo "CONFIG_HAVE_KPROBES=y" >> ${{ inputs.config_path }}${{ inputs.config_name }}
-          echo "CONFIG_KPROBE_EVENTS=y" >> ${{ inputs.config_path }}${{ inputs.config_name }}
-          git config --global user.email "robot@example.com"
-          git config --global user.name "robot"
-          git add ${{ inputs.config_path }}${{ inputs.config_name }}
-          git commit -m "KUS"
-          ./KernelSU/kernel/setup.sh v0.9.5
+          config_dir="${{ inputs.config_path }}"
+          config_dir="${config_dir%/}"
+          config_file="${config_dir}/${{ steps.init_config.outputs.processed_name }}"
+          if [ ! -f "${config_file}" ]; then
+            echo "Config file not found: ${config_file}"
+            exit 1
+          fi
+          for opt in CONFIG_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KPM CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
+            sed -i "/^${opt}=.*/d;/^# ${opt} is not set/d" "${config_file}"
+          done
+          cat <<'EOF' >> "${config_file}"
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KPM=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          EOF
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
       - name: Make
         run: |
           export ClangHome=$(pwd)/clang
           export PATH=${ClangHome}/bin:${PATH}
           cd kernel-source
-          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld ${{ inputs.config_name }}
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld ${{ steps.init_config.outputs.processed_name }}
           make -j$(nproc) LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KBUILD_BUILD_USER=hylab KBUILD_BUILD_HOST=localhost
 
       - name: Patch Boot
@@ -118,5 +132,5 @@ jobs:
       - name: Kernel REL
         uses: actions/upload-artifact@main
         with:
-          name: ${{ steps.init_config.outputs.processed_name }} KernelSU
+          name: ${{ steps.init_config.outputs.artifact_name }}
           path: ./Kernel.zip
