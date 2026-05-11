@@ -172,14 +172,20 @@ jobs:
           git clone --depth=1 -b "${{ inputs.susfs_ref }}" "${{ inputs.susfs_repo }}" susfs4ksu
           cd kernel-source
           susfs_patch="../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch"
+          compat_patch="../patches/sukisu-ultra-builtin-susfs4ksu-4.19-compat.patch"
           if [ ! -f "${susfs_patch}" ]; then
             echo "susfs patch not found: ${susfs_patch}"
+            exit 1
+          fi
+          if [ ! -f "${compat_patch}" ]; then
+            echo "compat patch not found: ${compat_patch}"
             exit 1
           fi
           cp -f ../susfs4ksu/kernel_patches/fs/* fs/
           cp -f ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -f "${susfs_patch}" ./
           patch -p1 -F 3 --forward < 50_add_susfs_in_kernel-4.19.patch
+          patch -p1 -F 3 --forward < "${compat_patch}"
           if [ -n "${{ inputs.susfs_merged_patch_url }}" ]; then
             curl -L "${{ inputs.susfs_merged_patch_url }}" -o sukisu-susfs-merged.patch
             patch -p1 -F 3 --forward < sukisu-susfs-merged.patch

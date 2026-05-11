@@ -88,10 +88,12 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ inputs.susfs_ref }}" "${{ inputs.susfs_repo }}" susfs4ksu
           cd kernel-source
+          compat_patch="../patches/sukisu-ultra-builtin-susfs4ksu-4.19-compat.patch"
           cp -f ../susfs4ksu/kernel_patches/fs/* fs/
           cp -f ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -f ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch ./
           patch -p1 -F 3 --forward < 50_add_susfs_in_kernel-4.19.patch | tee ../kernel-susfs-patch.log
+          patch -p1 -F 3 --forward < "${compat_patch}" | tee ../kernel-sukisu-compat-patch.log
           if [ -f ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
             mkdir -p KernelSU-patch-attempt
             cp -f ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-patch-attempt/
@@ -110,6 +112,7 @@ jobs:
           git diff -- drivers/kernelsu include/linux fs > ../context/kernel-source-focus.diff || true
           cd ..
           cp -f kernel-susfs-patch.log context/ 2>/dev/null || true
+          cp -f kernel-sukisu-compat-patch.log context/ 2>/dev/null || true
           cp -f kernelsu-susfs-patch.log context/ 2>/dev/null || true
           mkdir -p context/kernel-source/drivers context/kernel-source/include/linux context/kernel-source/fs context/susfs4ksu
           if [ -d kernel-source/drivers/kernelsu ]; then

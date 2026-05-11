@@ -1,0 +1,358 @@
+diff --git a/drivers/kernelsu/feature/adb_root.c b/drivers/kernelsu/feature/adb_root.c
+index 90c67d5..a7b08cc 100644
+--- a/drivers/kernelsu/feature/adb_root.c
++++ b/drivers/kernelsu/feature/adb_root.c
+@@ -10,8 +10,8 @@ static inline long is_exec_adbd(const char *filename)
+     if (strstr(filename, "adbd"))
+         pr_info("is_exec_adbd() => filename: %s\n", filename);
+ 
+-    return (susfs_starts_with(filename, "/apex/") &&
+-                susfs_ends_with(filename, "/adbd"));
++    return (ksu_susfs_starts_with(filename, "/apex/") &&
++                ksu_susfs_ends_with(filename, "/adbd"));
+ }
+ #else
+ static const char kAdbd[] = "/adbd";
+diff --git a/drivers/kernelsu/feature/sucompat.c b/drivers/kernelsu/feature/sucompat.c
+index e0ca9af..974b769 100644
+--- a/drivers/kernelsu/feature/sucompat.c
++++ b/drivers/kernelsu/feature/sucompat.c
+@@ -74,10 +74,10 @@ int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *arg
+             return 0;
+         } else if (likely(strstr(filename->name, "/app_process") == NULL &&
+                     strstr(filename->name, "/adbd") == NULL) &&
+-                    !susfs_is_current_proc_umounted())
++                    !ksu_susfs_is_current_proc_umounted())
+         {
+             pr_info("susfs: mark no sucompat checks for pid: '%d', exec: '%s'\n", current->pid, filename->name);
+-            susfs_set_current_proc_umounted();
++            ksu_susfs_set_current_proc_umounted();
+             return 0;
+         }
+ 
+diff --git a/drivers/kernelsu/hook/lsm_hook.c b/drivers/kernelsu/hook/lsm_hook.c
+index 8a6579d..1cd1e0a 100644
+--- a/drivers/kernelsu/hook/lsm_hook.c
++++ b/drivers/kernelsu/hook/lsm_hook.c
+@@ -19,11 +19,12 @@ static int ksu_key_permission(key_ref_t key_ref, const struct cred *cred, unsign
+ #ifdef CONFIG_KSU_SUSFS
+ extern u32 susfs_zygote_sid;
+ extern void disable_seccomp(void);
+-extern struct work_struct susfs_extra_works;
+ 
+ static void ksu_handle_extra_susfs_work(void)
+ {
+-    schedule_work(&susfs_extra_works);
++#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
++    susfs_run_try_umount_for_current_mnt_ns();
++#endif
+ }
+ 
+ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+@@ -72,7 +73,7 @@ do_umount:
+     }
+ 
+     // Mark current proc as umounted
+-    susfs_set_current_proc_umounted();
++    ksu_susfs_set_current_proc_umounted();
+ 
+     return 0;
+ }
+diff --git a/drivers/kernelsu/infra/kernel_compat.h b/drivers/kernelsu/infra/kernel_compat.h
+index 5b10ee7..392a61c 100644
+--- a/drivers/kernelsu/infra/kernel_compat.h
++++ b/drivers/kernelsu/infra/kernel_compat.h
+@@ -50,6 +50,57 @@ struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
+ #define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
+ #endif
+ 
++#ifdef CONFIG_KSU_SUSFS
++#ifndef SUSFS_MAGIC
++#define SUSFS_MAGIC 0xFAFAFAFA
++#endif
++
++#define KSU_SUSFS_COMPAT_UMOUNTED BIT(25)
++
++static inline bool ksu_susfs_starts_with(const char *str, const char *prefix)
++{
++    size_t prefix_len;
++
++    if (!str || !prefix)
++        return false;
++
++    prefix_len = strlen(prefix);
++    return strncmp(str, prefix, prefix_len) == 0;
++}
++
++static inline bool ksu_susfs_ends_with(const char *str, const char *suffix)
++{
++    size_t str_len;
++    size_t suffix_len;
++
++    if (!str || !suffix)
++        return false;
++
++    str_len = strlen(str);
++    suffix_len = strlen(suffix);
++    if (str_len < suffix_len)
++        return false;
++
++    return memcmp(str + str_len - suffix_len, suffix, suffix_len) == 0;
++}
++
++static inline bool ksu_susfs_is_current_proc_umounted(void)
++{
++    return !!(READ_ONCE(current->susfs_task_state) & KSU_SUSFS_COMPAT_UMOUNTED);
++}
++
++static inline void ksu_susfs_set_current_proc_umounted(void)
++{
++    task_lock(current);
++    current->susfs_task_state |= KSU_SUSFS_COMPAT_UMOUNTED;
++    task_unlock(current);
++}
++
++#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
++extern void susfs_run_try_umount_for_current_mnt_ns(void);
++#endif
++#endif
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0) // caller is reponsible for sanity!
+ static inline void ksu_zeroed_strncpy(char *dest, const char *src, size_t count)
+ {
+diff --git a/drivers/kernelsu/supercall/dispatch.c b/drivers/kernelsu/supercall/dispatch.c
+index 85ebd0f..b2a6914 100644
+--- a/drivers/kernelsu/supercall/dispatch.c
++++ b/drivers/kernelsu/supercall/dispatch.c
+@@ -55,9 +55,6 @@ static int do_report_event(void __user *arg)
+             boot_complete_lock = true;
+             pr_info("boot_complete triggered\n");
+             on_boot_completed();
+-#ifdef CONFIG_KSU_SUSFS
+-            susfs_start_sdcard_monitor_fn();
+-#endif
+         }
+         break;
+     }
+@@ -365,76 +362,175 @@ static int do_manage_mark(void __user *arg)
+ }
+ 
+ #ifdef CONFIG_KSU_SUSFS
++static size_t ksu_susfs_append_feature(char *buf, size_t buf_size, size_t len, const char *feature)
++{
++    size_t feature_len = strlen(feature);
++
++    if (len >= buf_size)
++        return len;
++
++    if (feature_len > buf_size - len - 1)
++        feature_len = buf_size - len - 1;
++
++    memcpy(buf + len, feature, feature_len);
++    len += feature_len;
++    buf[len] = '\0';
++
++    return len;
++}
++
++static int ksu_susfs_copy_string_to_user(void __user *arg, const char *value)
++{
++    size_t len = strlen(value) + 1;
++
++    if (!arg || IS_ERR(arg))
++        return -EINVAL;
++
++    if (!ksu_access_ok(arg, len))
++        return -EFAULT;
++
++    return copy_to_user(arg, value, len) ? -EFAULT : 0;
++}
++
++static bool ksu_susfs_read_u32_arg(void __user *arg, u32 *value)
++{
++    if (!arg || !value || IS_ERR(arg))
++        return false;
++
++    if ((unsigned long)arg < PAGE_SIZE)
++        return false;
++
++    if (!ksu_access_ok(arg, sizeof(*value)))
++        return false;
++
++    return copy_from_user(value, arg, sizeof(*value)) == 0;
++}
++
++static int ksu_susfs_show_enabled_features(void __user *arg)
++{
++    char features[1024] = { 0 };
++    size_t len = 0;
++
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SUS_PATH\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SUS_MOUNT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len,
++                                   "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len,
++                                   "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SUS_KSTAT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_OVERLAYFS
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SUS_OVERLAYFS\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_TRY_UMOUNT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len,
++                                   "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SPOOF_UNAME\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_ENABLE_LOG\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
++    len = ksu_susfs_append_feature(features, sizeof(features), len,
++                                   "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++    len = ksu_susfs_append_feature(features, sizeof(features), len,
++                                   "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_OPEN_REDIRECT\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_SU
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_SUS_SU\n");
++#endif
++#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
++    len = ksu_susfs_append_feature(features, sizeof(features), len, "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT\n");
++#endif
++
++    return ksu_susfs_copy_string_to_user(arg, features);
++}
++
+ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg)
+ {
++    void __user *argp;
++
+     if (magic1 != KSU_INSTALL_MAGIC1) {
+-        return -EINVAL; 
++        return -EINVAL;
+     }
+ 
+-    // If magic2 is susfs and current process is root
++    if (unlikely(!arg))
++        return -EINVAL;
++
++    argp = (void __user *)*arg;
++
+     if (magic2 == SUSFS_MAGIC && current_uid().val == 0) {
+-        switch(cmd) {
++        switch (cmd) {
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+         case CMD_SUSFS_ADD_SUS_PATH:
+-            susfs_add_sus_path(arg);
+-            return 0;
+-        case CMD_SUSFS_ADD_SUS_PATH_LOOP:
+-            susfs_add_sus_path_loop(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
++            return susfs_add_sus_path((struct st_susfs_sus_path __user *)argp);
++#endif
+ #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+-         case CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS:
+-            susfs_set_hide_sus_mnts_for_non_su_procs(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++        case CMD_SUSFS_ADD_SUS_MOUNT:
++            return susfs_add_sus_mount((struct st_susfs_sus_mount __user *)argp);
++#endif
+ #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+         case CMD_SUSFS_ADD_SUS_KSTAT:
+-            susfs_add_sus_kstat(arg);
+-            return 0;
+-        case CMD_SUSFS_UPDATE_SUS_KSTAT:
+-            susfs_update_sus_kstat(arg);
+-            return 0;
+         case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+-            susfs_add_sus_kstat(arg);
++            return susfs_add_sus_kstat((struct st_susfs_sus_kstat __user *)argp);
++        case CMD_SUSFS_UPDATE_SUS_KSTAT:
++            return susfs_update_sus_kstat((struct st_susfs_sus_kstat __user *)argp);
++#endif
++#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
++        case CMD_SUSFS_ADD_TRY_UMOUNT:
++            return susfs_add_try_umount((struct st_susfs_try_umount __user *)argp);
++        case CMD_SUSFS_RUN_UMOUNT_FOR_CURRENT_MNT_NS:
++            susfs_run_try_umount_for_current_mnt_ns();
+             return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++#endif
+ #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+         case CMD_SUSFS_SET_UNAME:
+-            susfs_set_uname(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++            return susfs_set_uname((struct st_susfs_uname __user *)argp);
++#endif
+ #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+-        case CMD_SUSFS_ENABLE_LOG:
+-            susfs_enable_log(arg);
++        case CMD_SUSFS_ENABLE_LOG: {
++            u32 enabled = 0;
++
++            if (ksu_susfs_read_u32_arg(argp, &enabled))
++                susfs_set_log(enabled != 0);
++            else
++                susfs_set_log((unsigned long)argp != 0);
+             return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
++        }
++#endif
+ #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+         case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
+-            susfs_set_cmdline_or_bootconfig(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++            return susfs_set_cmdline_or_bootconfig((char __user *)argp);
++#endif
+ #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+         case CMD_SUSFS_ADD_OPEN_REDIRECT:
+-            susfs_add_open_redirect(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+-        case CMD_SUSFS_ADD_SUS_MAP:
+-            susfs_add_sus_map(arg);
+-            return 0;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+-        case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+-            susfs_set_avc_log_spoofing(arg);
+-            return 0;
++            return susfs_add_open_redirect((struct st_susfs_open_redirect __user *)argp);
++#endif
+         case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+-            susfs_get_enabled_features(arg);
+-            return 0;
++            return ksu_susfs_show_enabled_features(argp);
+         case CMD_SUSFS_SHOW_VARIANT:
+-            susfs_show_variant(arg);
+-            return 0;
++            return ksu_susfs_copy_string_to_user(argp, SUSFS_VARIANT);
+         case CMD_SUSFS_SHOW_VERSION:
+-            susfs_show_version(arg);
+-            return 0;
++            return ksu_susfs_copy_string_to_user(argp, SUSFS_VERSION);
+         default:
+             return -EINVAL;
+         }
