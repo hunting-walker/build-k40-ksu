@@ -11,6 +11,10 @@ on:
         description: '添加 susfs 支持（4.19 non-GKI）'
         required: false
         default: 'true'
+      kpm:
+        description: '启用 KPM（4.19 non-GKI 默认关闭，开启可能需要额外兼容补丁）'
+        required: false
+        default: 'false'
       config_path:
         description: '内核配置文件路径（如果不需要KSU则忽略）/一般默认即可'
         required: false
@@ -83,9 +87,17 @@ jobs:
           echo "processed_name=${processed_name}" >> $GITHUB_OUTPUT
           if [ "${{ github.event.inputs.ksu }}" = "true" ]; then
             if [ "${{ github.event.inputs.susfs }}" = "true" ]; then
-              echo "artifact_name=${processed_name} SukiSU-Ultra susfs" >> $GITHUB_OUTPUT
+              if [ "${{ github.event.inputs.kpm }}" = "true" ]; then
+                echo "artifact_name=${processed_name} SukiSU-Ultra susfs KPM" >> $GITHUB_OUTPUT
+              else
+                echo "artifact_name=${processed_name} SukiSU-Ultra susfs" >> $GITHUB_OUTPUT
+              fi
             else
-              echo "artifact_name=${processed_name} SukiSU-Ultra" >> $GITHUB_OUTPUT
+              if [ "${{ github.event.inputs.kpm }}" = "true" ]; then
+                echo "artifact_name=${processed_name} SukiSU-Ultra KPM" >> $GITHUB_OUTPUT
+              else
+                echo "artifact_name=${processed_name} SukiSU-Ultra" >> $GITHUB_OUTPUT
+              fi
             fi
           else
             echo "artifact_name=${processed_name} Kernel" >> $GITHUB_OUTPUT
@@ -115,10 +127,14 @@ jobs:
           config_opts=(
             CONFIG_KPROBES
             CONFIG_KPROBE_EVENTS
-            CONFIG_KPM
             CONFIG_KALLSYMS
             CONFIG_KALLSYMS_ALL
           )
+          if [ "${{ github.event.inputs.kpm }}" = "true" ]; then
+            config_opts+=(
+              CONFIG_KPM
+            )
+          fi
           if [ "${{ github.event.inputs.susfs }}" = "true" ]; then
             config_opts+=(
               CONFIG_KSU_SUSFS
@@ -131,10 +147,13 @@ jobs:
           cat <<'EOF' >> "${config_file}"
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
-          CONFIG_KPM=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           EOF
+          if [ "${{ github.event.inputs.kpm }}" = "true" ]; then
+            printf '%s\n' \
+              'CONFIG_KPM=y' >> "${config_file}"
+          fi
           if [ "${{ github.event.inputs.susfs }}" = "true" ]; then
             printf '%s\n' \
               'CONFIG_KSU_SUSFS=y' \
