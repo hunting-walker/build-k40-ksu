@@ -1,0 +1,150 @@
+name: Collect SukiSU Context
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: '内核配置文件路径'
+        required: false
+        type: string
+        default: 'arch/arm64/configs/'
+      kernel_tag:
+        description: '内核代码分支/Tag'
+        required: false
+        type: string
+        default: 'master'
+      config_name:
+        description: '内核编译配置文件名'
+        required: false
+        type: string
+        default: 'alioth_hylab_defconfig'
+      git_url:
+        description: '内核仓库地址'
+        required: false
+        type: string
+        default: 'https://github.com/zfdx123/kernel_xiaomi_alioth.git'
+      susfs_repo:
+        description: 'susfs4ksu 仓库地址'
+        required: false
+        type: string
+        default: 'https://gitlab.com/simonpunk/susfs4ksu.git'
+      susfs_ref:
+        description: 'susfs4ksu 分支/Tag'
+        required: false
+        type: string
+        default: 'kernel-4.19'
+
+jobs:
+  collect_context:
+    name: Collect SukiSU Context
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+
+      - name: Install Tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y git curl patch rsync zip
+
+      - name: Init Config
+        id: init_config
+        run: |
+          processed_name="$(basename "${{ inputs.config_name }}")"
+          echo "processed_name=${processed_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone Kernel
+        run: |
+          git clone --depth=1 -b "${{ inputs.kernel_tag }}" "${{ inputs.git_url }}" kernel-source
+
+      - name: Integrate SukiSU Ultra
+        run: |
+          cd kernel-source
+          config_dir="${{ inputs.config_path }}"
+          config_dir="${config_dir%/}"
+          config_file="${config_dir}/${{ steps.init_config.outputs.processed_name }}"
+          if [ ! -f "${config_file}" ]; then
+            echo "Config file not found: ${config_file}"
+            exit 1
+          fi
+          for opt in CONFIG_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT CONFIG_KPM; do
+            sed -i "/^${opt}=.*/d;/^# ${opt} is not set/d" "${config_file}"
+          done
+          printf '%s\n' \
+            'CONFIG_KPROBES=y' \
+            'CONFIG_KPROBE_EVENTS=y' \
+            'CONFIG_KALLSYMS=y' \
+            'CONFIG_KALLSYMS_ALL=y' \
+            'CONFIG_KSU_SUSFS=y' \
+            'CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y' >> "${config_file}"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+
+      - name: Integrate susfs4ksu
+        run: |
+          git clone --depth=1 -b "${{ inputs.susfs_ref }}" "${{ inputs.susfs_repo }}" susfs4ksu
+          cd kernel-source
+          cp -f ../susfs4ksu/kernel_patches/fs/* fs/
+          cp -f ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          cp -f ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch ./
+          patch -p1 -F 3 --forward < 50_add_susfs_in_kernel-4.19.patch | tee ../kernel-susfs-patch.log
+          if [ -f ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
+            mkdir -p KernelSU-patch-attempt
+            cp -f ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-patch-attempt/
+            (
+              cd KernelSU-patch-attempt
+              patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch
+            ) > ../kernelsu-susfs-patch.log 2>&1 || true
+          fi
+
+      - name: Collect Files
+        run: |
+          mkdir -p context
+          cd kernel-source
+          git status --short > ../context/kernel-source-status.txt
+          git diff > ../context/kernel-source.diff || true
+          git diff -- drivers/kernelsu include/linux fs > ../context/kernel-source-focus.diff || true
+          cd ..
+          cp -f kernel-susfs-patch.log context/ 2>/dev/null || true
+          cp -f kernelsu-susfs-patch.log context/ 2>/dev/null || true
+          mkdir -p context/kernel-source/drivers context/kernel-source/include/linux context/kernel-source/fs context/susfs4ksu
+          if [ -d kernel-source/drivers/kernelsu ]; then
+            rsync -a kernel-source/drivers/kernelsu/ context/kernel-source/drivers/kernelsu/
+          fi
+          if [ -d kernel-source/KernelSU ]; then
+            rsync -a kernel-source/KernelSU/ context/kernel-source/KernelSU/
+          fi
+          if [ -f kernel-source/include/linux/susfs.h ]; then
+            cp -f kernel-source/include/linux/susfs.h context/kernel-source/include/linux/
+          fi
+          if [ -d kernel-source/fs ]; then
+            find kernel-source/fs -maxdepth 1 \( -name '*susfs*' -o -name 'Makefile' -o -name 'Kconfig' \) -type f -exec cp -f {} context/kernel-source/fs/ \;
+          fi
+          find kernel-source -type f \( -name '*.rej' -o -name '*.orig' \) -exec sh -c '
+            for file do
+              rel="${file#kernel-source/}"
+              mkdir -p "context/kernel-source/$(dirname "$rel")"
+              cp -f "$file" "context/kernel-source/$rel"
+            done
+          ' sh {} +
+          rsync -a susfs4ksu/kernel_patches/ context/susfs4ksu/kernel_patches/
+          cat <<'EOF' > context/README.txt
+          Upload this artifact back into the local workspace or extract it into the repo root.
+          The most important files for manual patching are:
+          - context/kernel-source/drivers/kernelsu/
+          - context/kernel-source/include/linux/susfs.h
+          - context/kernel-source/fs/
+          - context/susfs4ksu/kernel_patches/
+          - context/kernel-source-focus.diff
+          - context/kernelsu-susfs-patch.log
+          EOF
+
+      - name: Upload Context
+        uses: actions/upload-artifact@main
+        with:
+          name: sukisu-context
+          path: ./context
