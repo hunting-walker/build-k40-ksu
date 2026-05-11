@@ -112,7 +112,18 @@ jobs:
           export PATH=${ClangHome}/bin:${PATH}
           cd kernel-source
           make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld ${{ steps.init_config.outputs.processed_name }}
-          make -j$(nproc) LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KBUILD_BUILD_USER=hylab KBUILD_BUILD_HOST=localhost
+          set -o pipefail
+          make -j$(nproc) LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KBUILD_BUILD_USER=hylab KBUILD_BUILD_HOST=localhost 2>&1 | tee ../build.log
+          build_status=${PIPESTATUS[0]}
+          if [ ${build_status} -ne 0 ]; then
+            echo "::group::Retry build with -j1"
+            make -j1 LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KBUILD_BUILD_USER=hylab KBUILD_BUILD_HOST=localhost 2>&1 | tee ../build-serial.log || true
+            echo "::endgroup::"
+            echo "::group::Build error summary"
+            grep -nE "error:|fatal error:|undefined reference|No rule to make target" ../build-serial.log ../build.log | head -n 200 || true
+            echo "::endgroup::"
+            exit ${build_status}
+          fi
 
       - name: Patch Boot
         run: |
@@ -134,3 +145,13 @@ jobs:
         with:
           name: ${{ steps.init_config.outputs.artifact_name }}
           path: ./Kernel.zip
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@main
+        with:
+          name: ${{ steps.init_config.outputs.processed_name }} build-log
+          path: |
+            ./build.log
+            ./build-serial.log
+          if-no-files-found: ignore
